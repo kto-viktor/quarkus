@@ -1,5 +1,9 @@
 package io.quarkus.hibernate.orm.runtime;
 
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +32,7 @@ import org.jboss.logging.Logger;
 import io.quarkus.agroal.runtime.AgroalDataSourceUtil;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ClientProxy;
+import io.quarkus.fs.util.ZipUtils;
 import io.quarkus.hibernate.orm.runtime.RuntimeSettings.Builder;
 import io.quarkus.hibernate.orm.runtime.boot.FastBootEntityManagerFactoryBuilder;
 import io.quarkus.hibernate.orm.runtime.boot.QuarkusPersistenceUnitDescriptor;
@@ -203,6 +208,8 @@ public final class FastBootHibernatePersistenceProvider implements PersistencePr
         final IntegrationSettings integrationSettings = recordedState.getIntegrationSettings();
         Builder runtimeSettingsBuilder = new Builder(buildTimeSettings, integrationSettings);
 
+        runtimeSettingsBuilder = unzipImportSqlIfPresent(buildTimeSettings, runtimeSettingsBuilder);
+
         Optional<String> dataSourceName = recordedState.getBuildTimeSettings().getSource().getDataSource();
         if (dataSourceName.isPresent()) {
             // Inject the datasource
@@ -280,6 +287,29 @@ public final class FastBootHibernatePersistenceProvider implements PersistencePr
         }
 
         return runtimeSettingsBuilder.build();
+    }
+
+    private Builder unzipImportSqlIfPresent(BuildTimeSettings buildTimeSettings, Builder runtimeSettingsBuilder) {
+        final String ddlImportFiles = (String) buildTimeSettings.get(AvailableSettings.HBM2DDL_IMPORT_FILES);
+        try {
+            if (ddlImportFiles != null && ddlImportFiles.endsWith(".zip")) {
+                Path unzipDir = Files.createTempDirectory("import-sql-unzip-");
+                var resource = getClass().getClassLoader().getResource(ddlImportFiles);
+                Path importFile = Paths.get(resource.toURI());
+                ZipUtils.unzip(importFile, unzipDir);
+                DirectoryStream<Path> stream = Files.newDirectoryStream(unzipDir);
+                for (Path file : stream) {
+                    if (file.toAbsolutePath().toString().endsWith("sql")) {
+                        String replacement = "file://" + file.toAbsolutePath();
+                        runtimeSettingsBuilder.put(AvailableSettings.HBM2DDL_IMPORT_FILES, replacement);
+                    }
+                }
+            }
+            return runtimeSettingsBuilder;
+        } catch (Exception e) {
+            log.errorf("Error unzipping import files: %s", e.getMessage());
+            throw new IllegalStateException(e);
+        }
     }
 
     private StandardServiceRegistry rewireMetadataAndExtractServiceRegistry(String persistenceUnitName, RecordedState rs,
